@@ -39,7 +39,9 @@ namespace Wildwood.Core.Meshing
 
         const int Size = BlockConstants.ChunkSize;
 
-        public static void Build(BlockWorld world, int3 chunkCoord, MeshBuffers output, int paletteRows)
+        /// <param name="shadeOffset">Added to block positions when picking shades, so a piece that broke off keeps
+        /// the exact colors it had in the world.</param>
+        public static void Build(BlockWorld world, int3 chunkCoord, MeshBuffers output, int paletteRows, int3 shadeOffset = default)
         {
             output.Clear();
             if (!world.TryGetChunk(chunkCoord, out var chunk) || chunk.IsEmpty) return;
@@ -57,7 +59,7 @@ namespace Wildwood.Core.Meshing
                 if (shape.IsEmpty) continue;
 
                 var local = new Vector3(x, y, z);
-                Vector2 uv = PaletteUV(block.Material, origin + new int3(x, y, z), paletteRows);
+                Vector2 uv = PaletteUV(block.Material, origin + new int3(x, y, z) + shadeOffset, paletteRows);
 
                 for (int face = 0; face < BlockFaces.Count; face++)
                 {

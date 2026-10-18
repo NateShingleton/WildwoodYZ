@@ -29,6 +29,8 @@ Read this first in any new chat. It records what the game is, the decisions alre
 - **Grass:** GPU-instanced tufts (`Graphics.RenderMeshInstanced`) within ~45 m of the camera; normals point up for soft lighting. Wind needs a custom shader (art pass).
 - **Colors:** everything uses stock URP Lit materials reading small generated palette textures through UVs (`BlockPalette`, `NaturePalettes`). One draw call per chunk.
 - **Saving:** only the host saves: seed + all block chunks (`WorldSaveFormat`), to `%USERPROFILE%/AppData/LocalLow/ShingIndustries/Wildwood/Worlds/sandbox.wwworld`. Saves on new world, every 60 s, and when the session ends. Written to a temp file first.
+- **Breaking off (built):** after every edit or undo, the host flood-fills from the changed blocks (`StructureCheck`). A group that can't reach the ground breaks off. Ground = the generated terrain height under any of a block's 4 bottom corners, with 6 cm of slack because the visible terrain is a smoothed mesh. Blocks only hold each other up through faces that share area (two slopes meeting along an edge don't count). Groups over 40k blocks or 256 blocks per side are treated as held up for now. A loose group becomes a `BlockPiece` (blocks cut out of the world into a small local box), sent to clients once; the host simulates it as a rigidbody (mass from material density, greedy box colliders, max 96) and streams position/rotation ~20x/s on an unreliable channel; client copies are kinematic and glide to it. Max 60 pieces (oldest removed); left click clears one. Pieces aren't saved yet.
+- **Character (built):** `PlayerAvatar` builds an original low-poly Norse-style character from tapered boxes at runtime (no model file), dressed in 32 px point-filtered textures from `PixelTextures` (wool with a woven band, leather, hair strands). Colors per player from their client id. It animates itself from its own movement (walk/run cycle, idle breathing, air pose from a ground probe), so remote players animate without extra network data. Eye/camera height 1.66 m. Replace with a rigged model + Animator in the art pass.
 - **Look:** golden-hour sun in front of spawn (backlit), procedural sky, linear warm fog (30-140 m, also hides the terrain load edge), trilight ambient (no bake needed), global volume: neutral tonemapping, bloom, warm color grading, light vignette. SMAA on the camera.
 
 ## Multiplayer rules (follow these for every feature)
@@ -66,12 +68,16 @@ Namespaces match: `Wildwood.Core.Blocks`, `Wildwood.Core.Meshing`, `Wildwood.Cor
 - `Core/Blocks/ChunkSerializer.cs`: run-length encoding for snapshots (and later saves).
 - `Core/Blocks/ShapeStamp.cs`: build shaped blocks from an "is this point inside?" rule (slopes, pyramids, rocks). `DemoStructures.cs` uses it.
 - `Core/Meshing/ChunkMesher.cs`: chunk to triangles, flat-shaded, palette UVs. Plain C# for now; Burst + greedy merging later.
-- `Net/BlockWorldSync.cs`: host-authoritative edits, the world seed, and join snapshots over Netcode named messages. `Stopping` event fires before the world is cleared (save hook).
+- `Net/BlockWorldSync.cs`: host-authoritative edits, undo, the world seed, join snapshots, and falling pieces (detach / state / remove messages) over Netcode named messages. `Stopping` event fires before the world is cleared (save hook).
 - `Game/Blocks/BlockWorldView.cs`: owns the world on this machine: loads/saves when hosting, raises `WorldStarted(seed)` / `WorldEnded`, rebuilds block chunk meshes/colliders. `BlockPalette.cs` makes the color texture.
 - `Game/Persistence/WorldStorage.cs`: save file location, safe save/load, `WorldOptions` (new world vs continue).
 - `Game/Terrain/TerrainView.cs`: streams terrain columns (8 columns = 128 m radius) around the camera within a per-frame time budget, trees per column, grass. `TreeMeshBuilder`, `GrassField`, `NaturePalettes` support it.
 - `Game/Blocks/BlockInteractor.cs`: aiming, drag-to-build/remove with height (C), preview outline, chisel, materials, brush sizes, undo key, HUD (on the player prefab). Runs before `PlayerController` (`DefaultExecutionOrder(-50)`) so Escape can cancel a drag without freeing the mouse.
 - `Core/Blocks/UndoHistory.cs`: per-player undo stacks kept by the host.
+- `Core/Blocks/StructureCheck.cs`: finds groups of blocks that lost their connection to the ground.
+- `Core/Blocks/BlockPiece.cs`: a loose group of blocks (extract from the world, mass, collision boxes, network encoding). `BlockPieceState` = position + rotation.
+- `Game/Blocks/FallingPieces.cs` + `FallingPiece.cs`: the physics objects for loose pieces (on the `BlockWorld` object). Host simulates and sends; clients follow.
+- `Game/Player/PlayerAvatar.cs` + `PixelTextures.cs`: the procedural character and its pixel textures.
 
 ## How to test
 1. **Build the scene:** menu **Wildwood > Build Sandbox Scene** (rebuilds `Scenes/Sandbox.unity` and `Prefabs/Player.prefab` from code).
@@ -81,6 +87,7 @@ Namespaces match: `Wildwood.Core.Blocks`, `Wildwood.Core.Meshing`, `Wildwood.Cor
    Building: hold right click and drag to draw a line/rectangle on the surface you started on; press C mid-drag to pull it up into a box (crosshair sets the height); release to place; Esc or the other mouse button cancels. Hold left click to do the same for removing. 1-8 material, scroll brush size (1/2/4/8 blocks, drags snap to the brush grid). C (not dragging) toggles chisel: left click deletes the marked corner of the brush box. Z undoes your last edit. V toggles first/third person.
    Note: in the Unity Editor, Escape always frees the mouse too (editor behavior); in a built game it only cancels the drag.
    Players hover in place if no ground exists below them yet (terrain still loading).
+   Breaking off: build a pillar with a beam sticking out, then remove a block low in the pillar; everything above the cut falls. Left click a fallen piece to clear it.
 5. **Tests:** Window > General > Test Runner > EditMode > Run All.
 
 ## Build order
@@ -89,7 +96,7 @@ Namespaces match: `Wildwood.Core.Blocks`, `Wildwood.Core.Meshing`, `Wildwood.Cor
 3. ~~**Blocks:** chunk data, corner-shape table, meshing, place/remove/chisel synced between players, join snapshots~~ (done)
 3b. **Terrain and nature:** plains/forest terrain, trees, grass, big chisel, world saving, golden-hour look (built, needs testing)
 4. **Building tools:** ~~line, rectangle, box (drag + C for height), plane lock, brush sizes, preview, undo, first/third person~~ (built, needs testing). Still to do: mirror, blueprints, auto-slope, redo.
-5. **Breaking off:** disconnected pieces fall with physics
+5. ~~**Breaking off:** disconnected pieces fall with physics~~ (built, needs testing). Also: the player character.
 6. **Shatter, pickups, vacuum**
 7. **Weight and strength,** stress view, collapse warnings
 

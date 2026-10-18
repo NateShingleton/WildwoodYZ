@@ -50,7 +50,6 @@ namespace Wildwood.EditorTools
 
             var stoneMat = GetOrCreateMaterial("Stone", new Color(0.62f, 0.60f, 0.56f));
             var bodyMat = GetOrCreateMaterial("PlayerBody", Color.white);
-            var visorMat = GetOrCreateMaterial("PlayerVisor", new Color(0.12f, 0.13f, 0.16f));
             var blocksMat = GetOrCreateMaterial("Blocks", Color.white);
             blocksMat.SetFloat("_Smoothness", 0.05f);
             var outlineMat = GetOrCreateMaterial("BlockOutline", new Color(1f, 1f, 1f), "Universal Render Pipeline/Unlit");
@@ -67,7 +66,7 @@ namespace Wildwood.EditorTools
             // Make the new scene first so the temporary objects below never touch any other scene.
             var scene = EditorSceneManager.NewScene(NewSceneSetup.DefaultGameObjects, NewSceneMode.Single);
 
-            var playerPrefab = BuildPlayerPrefab(bodyMat, visorMat);
+            var playerPrefab = BuildPlayerPrefab(bodyMat);
             var prefabList = RegisterNetworkPrefab(playerPrefab);
 
             var sun = SetUpCameraAndLight(scene);
@@ -88,7 +87,7 @@ namespace Wildwood.EditorTools
 
         // ---------- Player ----------
 
-        static GameObject BuildPlayerPrefab(Material bodyMaterial, Material visorMaterial)
+        static GameObject BuildPlayerPrefab(Material bodyMaterial)
         {
             var root = new GameObject("Player") { tag = "Player" };
 
@@ -112,31 +111,20 @@ namespace Wildwood.EditorTools
 
             var player = root.AddComponent<PlayerController>();
 
-            var body = GameObject.CreatePrimitive(PrimitiveType.Capsule);
-            body.name = "Body";
-            Object.DestroyImmediate(body.GetComponent<Collider>());
-            body.transform.SetParent(root.transform, false);
-            body.transform.localPosition = new Vector3(0f, 0.9f, 0f);
-            body.transform.localScale = new Vector3(0.7f, 0.9f, 0.7f);
-            var bodyRenderer = body.GetComponent<MeshRenderer>();
-            bodyRenderer.sharedMaterial = bodyMaterial;
+            // The low-poly character builds its own body when the game starts (see PlayerAvatar).
+            var avatar = root.AddComponent<PlayerAvatar>();
+            var avatarSerialized = new SerializedObject(avatar);
+            avatarSerialized.FindProperty("baseMaterial").objectReferenceValue = bodyMaterial;
+            avatarSerialized.ApplyModifiedPropertiesWithoutUndo();
 
-            // A dark visor so you can tell which way each player is facing.
-            var visor = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            visor.name = "Visor";
-            Object.DestroyImmediate(visor.GetComponent<Collider>());
-            visor.transform.SetParent(root.transform, false);
-            visor.transform.localPosition = new Vector3(0f, 1.45f, 0.28f);
-            visor.transform.localScale = new Vector3(0.42f, 0.14f, 0.14f);
-            visor.GetComponent<MeshRenderer>().sharedMaterial = visorMaterial;
-
+            // Eye height of the character (first person looks from here; third person orbits it).
             var cameraTarget = new GameObject("CameraTarget").transform;
             cameraTarget.SetParent(root.transform, false);
-            cameraTarget.localPosition = new Vector3(0f, 1.6f, 0f);
+            cameraTarget.localPosition = new Vector3(0f, 1.66f, 0f);
 
             var serialized = new SerializedObject(player);
             serialized.FindProperty("cameraTarget").objectReferenceValue = cameraTarget;
-            serialized.FindProperty("bodyRenderer").objectReferenceValue = bodyRenderer;
+            serialized.FindProperty("bodyRenderer").objectReferenceValue = null;
             serialized.ApplyModifiedPropertiesWithoutUndo();
 
             var interactor = root.AddComponent<BlockInteractor>();
@@ -402,6 +390,9 @@ namespace Wildwood.EditorTools
             serialized.FindProperty("blockMaterial").objectReferenceValue = blocksMaterial;
             serialized.FindProperty("outlineMaterial").objectReferenceValue = outlineMaterial;
             serialized.ApplyModifiedPropertiesWithoutUndo();
+
+            // Pieces that lose support break off and fall as physics objects.
+            blockWorld.AddComponent<FallingPieces>();
         }
 
         // ---------- Assets ----------

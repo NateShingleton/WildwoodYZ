@@ -15,13 +15,24 @@ namespace Wildwood.Core.Blocks
 
         public static byte[] Encode(ChunkData chunk)
         {
-            var output = new List<byte>(256);
             Block[] blocks = chunk.RawBlocks;
             if (blocks == null)
             {
-                WriteRun(output, BlockConstants.ChunkVolume, Block.Air);
-                return output.ToArray();
+                var empty = new List<byte>(RunBytes);
+                WriteRun(empty, BlockConstants.ChunkVolume, Block.Air);
+                return empty.ToArray();
             }
+            return EncodeBlocks(blocks);
+        }
+
+        /// <summary>Decodes a chunk. Throws <see cref="FormatException"/> on malformed data. The result is not sanitized.</summary>
+        public static Block[] Decode(byte[] data) => DecodeBlocks(data, BlockConstants.ChunkVolume);
+
+        /// <summary>Run-length encodes any block array (chunks, falling pieces).</summary>
+        public static byte[] EncodeBlocks(Block[] blocks)
+        {
+            var output = new List<byte>(256);
+            if (blocks.Length == 0) return output.ToArray();
 
             Block current = blocks[0];
             int length = 1;
@@ -40,12 +51,13 @@ namespace Wildwood.Core.Blocks
             return output.ToArray();
         }
 
-        /// <summary>Decodes a chunk. Throws <see cref="FormatException"/> on malformed data. The result is not sanitized.</summary>
-        public static Block[] Decode(byte[] data)
+        /// <summary>Decodes exactly <paramref name="count"/> blocks. Throws <see cref="FormatException"/> on malformed data.</summary>
+        public static Block[] DecodeBlocks(byte[] data, int count)
         {
-            if (data == null || data.Length % RunBytes != 0) throw new FormatException("Chunk data has the wrong length.");
+            if (data == null || data.Length % RunBytes != 0) throw new FormatException("Block data has the wrong length.");
+            if (count < 0) throw new FormatException("Bad block count.");
 
-            var blocks = new Block[BlockConstants.ChunkVolume];
+            var blocks = new Block[count];
             int index = 0;
             for (int p = 0; p < data.Length; p += RunBytes)
             {
@@ -56,15 +68,15 @@ namespace Wildwood.Core.Blocks
                     Corners = data[p + 4],
                     Reserved = data[p + 5],
                 };
-                if (length == 0 || index + length > BlockConstants.ChunkVolume)
-                    throw new FormatException("Chunk data has a bad run length.");
+                if (length == 0 || index + length > count)
+                    throw new FormatException("Block data has a bad run length.");
                 if (!block.IsAir)
                 {
                     for (int i = 0; i < length; i++) blocks[index + i] = block;
                 }
                 index += length;
             }
-            if (index != BlockConstants.ChunkVolume) throw new FormatException("Chunk data is incomplete.");
+            if (index != count) throw new FormatException("Block data is incomplete.");
             return blocks;
         }
 

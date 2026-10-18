@@ -47,9 +47,10 @@ namespace Wildwood.Core.Blocks
 
         /// <summary>
         /// Reverts <paramref name="player"/>'s most recent edit. Adds every chunk that changed to
-        /// <paramref name="changedChunks"/>. Returns how many blocks were restored (0 if there was nothing to undo).
+        /// <paramref name="changedChunks"/> (and every restored block to <paramref name="restoredBlocks"/>, if given).
+        /// Returns how many blocks were restored (0 if there was nothing to undo).
         /// </summary>
-        public int Undo(BlockWorld world, ulong player, HashSet<int3> changedChunks)
+        public int Undo(BlockWorld world, ulong player, HashSet<int3> changedChunks, List<int3> restoredBlocks = null)
         {
             if (!_players.TryGetValue(player, out var history) || history.Entries.Count == 0) return 0;
 
@@ -64,6 +65,7 @@ namespace Wildwood.Core.Blocks
                 if (world.GetBlock(change.Position) != change.After) continue; // someone changed it since
                 if (!world.SetBlock(change.Position, change.Before)) continue;
                 changedChunks.Add(BlockWorld.ChunkOf(change.Position));
+                restoredBlocks?.Add(change.Position);
                 restored++;
             }
             return restored;

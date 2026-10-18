@@ -259,6 +259,8 @@ namespace Wildwood.Game.Player
 
         void ApplyColor()
         {
+            // The character model picks its own colors per player; the old capsule body just gets tinted.
+            if (TryGetComponent(out PlayerAvatar avatar)) avatar.ApplyLook(OwnerClientId);
             if (bodyRenderer == null) return;
             var color = PlayerColors[(int)(OwnerClientId % (ulong)PlayerColors.Length)];
             bodyRenderer.material.color = color;

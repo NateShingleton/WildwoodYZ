@@ -17,6 +17,7 @@ namespace Wildwood.Game.Blocks
     ///   1-8: material.  Scroll: brush size (1/2/4/8 blocks; drags snap to the brush grid).
     ///   C (when not dragging): chisel mode. Left click deletes the marked corner of the brush box.
     ///   Z: undo your last edit.
+    ///   Left click a fallen piece: clear it away (until rubble turns into pickups).
     /// Runs before PlayerController so Escape can cancel a drag without also freeing the mouse.
     /// </summary>
     [DefaultExecutionOrder(-50)]
@@ -62,6 +63,7 @@ namespace Wildwood.Game.Blocks
         int3 _placeBlock;    // the empty cell in front of it
         int _hitAxis;        // which axis the surface faces along (0 = x, 1 = y, 2 = z)
         int _targetCorner;   // nearest remaining corner of the chisel box
+        FallingPiece _targetPiece; // a fallen piece under the crosshair, if any
 
         // The drag in progress. Positions are in brush cells (one cell = brush size in blocks).
         DragKind _drag;
@@ -140,6 +142,12 @@ namespace Wildwood.Game.Blocks
                 return;
             }
 
+            if (mouse.leftButton.wasPressedThisFrame && _targetPiece != null)
+            {
+                view.RequestRemovePiece(_targetPiece.Id);
+                return;
+            }
+
             if (mouse.rightButton.wasPressedThisFrame) BeginDrag(DragKind.Place, _placeBlock);
             else if (mouse.leftButton.wasPressedThisFrame) BeginDrag(DragKind.Remove, _targetBlock);
         }
@@ -166,6 +174,7 @@ namespace Wildwood.Game.Blocks
         void Aim(BlockWorld world)
         {
             _hasTarget = false;
+            _targetPiece = null;
             var camera = Camera.main;
             if (camera == null) return;
 
@@ -184,6 +193,8 @@ namespace Wildwood.Game.Blocks
             RaycastHit hit = _hits[best];
             Vector3 head = eye != null ? eye.position : transform.position + Vector3.up * 1.6f;
             if ((hit.point - head).sqrMagnitude > reach * reach) return;
+
+            _targetPiece = hit.collider.GetComponentInParent<FallingPiece>();
 
             float size = BlockConstants.BlockSize;
             _targetBlock = ToBlock(hit.point - hit.normal * (size * 0.25f));
@@ -538,7 +549,9 @@ namespace Wildwood.Game.Blocks
             else
             {
                 line1 = $"BUILD  -  {material} (1-8)  -  brush {BrushSize} block{(BrushSize > 1 ? "s" : "")} = {BrushSize * 10} cm (scroll)";
-                line2 = "Hold right click: draw & place    Hold left click: draw & remove    C: chisel    Z: undo    V: view";
+                line2 = _targetPiece != null
+                    ? "Left click: clear this fallen piece    Right click: place    Z: undo    V: view"
+                    : "Hold right click: draw & place    Hold left click: draw & remove    C: chisel    Z: undo    V: view";
             }
 
             var area = new Rect(16f, Screen.height - 104f, 760f, 88f);

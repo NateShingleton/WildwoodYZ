@@ -50,6 +50,12 @@ namespace Wildwood.Game.Blocks
 
         public Material OutlineMaterial => outlineMaterial;
 
+        /// <summary>The material blocks draw with (palette already applied). Falling pieces share it.</summary>
+        public Material BlockMaterial => _runtimeMaterial;
+
+        /// <summary>The network sync (null until Start). Falling pieces listen to it.</summary>
+        public BlockWorldSync Sync => _sync;
+
         /// <summary>True while in a session, so edits can be sent.</summary>
         public bool CanEdit => _sync != null && _sync.IsRunning;
 
@@ -133,6 +139,32 @@ namespace Wildwood.Game.Blocks
         public void RequestUndo()
         {
             _sync?.RequestUndo();
+        }
+
+        /// <summary>Clear a fallen piece away.</summary>
+        public void RequestRemovePiece(uint id)
+        {
+            _sync?.RequestRemovePiece(id);
+        }
+
+        /// <summary>
+        /// Rebuild every changed chunk right now instead of a few per frame. Used when a piece breaks off,
+        /// so the world's colliders no longer contain the piece's blocks before it starts falling.
+        /// </summary>
+        public void RebuildDirtyNow()
+        {
+            World.TakeDirty(_dirty);
+            foreach (int3 coord in _dirty)
+            {
+                if (_queued.Add(coord)) _rebuildQueue.Enqueue(coord);
+            }
+            _dirty.Clear();
+            while (_rebuildQueue.Count > 0)
+            {
+                int3 coord = _rebuildQueue.Dequeue();
+                _queued.Remove(coord);
+                Rebuild(coord);
+            }
         }
 
         void OnHostStarted()
