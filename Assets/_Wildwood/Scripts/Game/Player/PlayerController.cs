@@ -1,6 +1,8 @@
 using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.Rendering;
+using Wildwood.Game.Blocks;
 using Wildwood.Game.UI;
 
 namespace Wildwood.Game.Player
@@ -54,6 +56,11 @@ namespace Wildwood.Game.Player
         float _verticalVelocity;
         float _yaw;
         float _pitch = 10f;
+        bool _firstPerson;
+        Renderer[] _ownRenderers;
+
+        /// <summary>True while the local player is looking through their own eyes.</summary>
+        public bool IsFirstPerson => _firstPerson;
 
         void Awake()
         {
@@ -70,13 +77,19 @@ namespace Wildwood.Game.Player
             _yaw = transform.eulerAngles.y;
             ApplyCameraTarget();
             if (PlayerCameraRig.Instance != null) PlayerCameraRig.Instance.Follow(cameraTarget);
+            _ownRenderers = GetComponentsInChildren<Renderer>();
+            SetFirstPerson(false);
             SetCursorLocked(true);
         }
 
         public override void OnNetworkDespawn()
         {
             if (!IsOwner) return;
-            if (PlayerCameraRig.Instance != null) PlayerCameraRig.Instance.Release(cameraTarget);
+            if (PlayerCameraRig.Instance != null)
+            {
+                PlayerCameraRig.Instance.SetFirstPerson(false);
+                PlayerCameraRig.Instance.Release(cameraTarget);
+            }
             SetCursorLocked(false);
         }
 
@@ -86,6 +99,9 @@ namespace Wildwood.Game.Player
 
             UpdateCursorLock();
             bool hasControl = Cursor.lockState == CursorLockMode.Locked;
+
+            var keyboard = Keyboard.current;
+            if (hasControl && keyboard != null && keyboard.vKey.wasPressedThisFrame) SetFirstPerson(!_firstPerson);
 
             ReadLook(hasControl);
             Move(hasControl);
@@ -142,16 +158,52 @@ namespace Wildwood.Game.Player
                 if (hasControl && _jump != null && _jump.WasPressedThisFrame())
                     _verticalVelocity = Mathf.Sqrt(2f * jumpHeight * -gravity);
             }
-            _verticalVelocity += gravity * dt;
+
+            if (!_controller.isGrounded && !GroundExistsBelow())
+            {
+                // The terrain under us hasn't loaded yet (just joined, or ran past the loaded area).
+                // Hover in place instead of falling through the world.
+                _verticalVelocity = 0f;
+            }
+            else
+            {
+                _verticalVelocity += gravity * dt;
+            }
 
             CollisionFlags hits = _controller.Move((_horizontalVelocity + Vector3.up * _verticalVelocity) * dt);
             if ((hits & CollisionFlags.Above) != 0 && _verticalVelocity > 0f) _verticalVelocity = 0f;
 
-            if (wish.sqrMagnitude > 0.0001f)
+            if (_firstPerson)
+            {
+                // In first person the body always faces where you look, so others can see it too.
+                transform.rotation = Quaternion.Euler(0f, _yaw, 0f);
+            }
+            else if (wish.sqrMagnitude > 0.0001f)
             {
                 Quaternion facing = Quaternion.LookRotation(wish, Vector3.up);
                 transform.rotation = Quaternion.RotateTowards(transform.rotation, facing, turnSpeed * dt);
             }
+        }
+
+        /// <summary>Switch between looking through your own eyes and the over-the-shoulder camera.</summary>
+        void SetFirstPerson(bool firstPerson)
+        {
+            _firstPerson = firstPerson;
+            if (PlayerCameraRig.Instance != null) PlayerCameraRig.Instance.SetFirstPerson(firstPerson);
+
+            // Hide your own body from your own camera in first person, but keep its shadow.
+            if (_ownRenderers == null) return;
+            foreach (var part in _ownRenderers)
+            {
+                if (part == null) continue;
+                part.shadowCastingMode = firstPerson ? ShadowCastingMode.ShadowsOnly : ShadowCastingMode.On;
+            }
+        }
+
+        bool GroundExistsBelow()
+        {
+            // Starts inside our own capsule, which raycasts ignore, so it only finds the world.
+            return Physics.Raycast(transform.position + Vector3.up * 0.5f, Vector3.down, 500f, ~0, QueryTriggerInteraction.Ignore);
         }
 
         void ApplyCameraTarget()
@@ -166,7 +218,12 @@ namespace Wildwood.Game.Player
 
             if (Cursor.lockState == CursorLockMode.Locked)
             {
-                if (keyboard != null && keyboard.escapeKey.wasPressedThisFrame) SetCursorLocked(false);
+                // Escape frees the mouse, unless it was just used to cancel a build drag.
+                if (keyboard != null && keyboard.escapeKey.wasPressedThisFrame &&
+                    BlockInteractor.EscapeConsumedFrame != Time.frameCount)
+                {
+                    SetCursorLocked(false);
+                }
             }
             else if (mouse != null && mouse.leftButton.wasPressedThisFrame)
             {

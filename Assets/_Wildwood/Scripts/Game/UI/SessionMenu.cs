@@ -1,5 +1,6 @@
 using Unity.Netcode;
 using UnityEngine;
+using Wildwood.Game.Persistence;
 using Wildwood.Net;
 
 namespace Wildwood.Game.UI
@@ -38,7 +39,7 @@ namespace Wildwood.Game.UI
 
         void OnGUI()
         {
-            var area = new Rect(16f, 16f, 260f, 260f);
+            var area = new Rect(16f, 16f, 260f, 300f);
             GUILayout.BeginArea(area);
             GUILayout.BeginVertical(GUI.skin.box);
 
@@ -68,8 +69,15 @@ namespace Wildwood.Game.UI
         void DrawLobby()
         {
             GUILayout.Label("Wildwood test session");
-            if (GUILayout.Button("Host", GUILayout.Height(30)))
+            bool hasSave = WorldStorage.HasSave;
+            if (GUILayout.Button(hasSave ? "Host (continue saved world)" : "Host", GUILayout.Height(30)))
             {
+                WorldOptions.NewWorldRequested = false;
+                _status = Session.Host(ParsePort()) ? "" : "Couldn't start hosting. Check the Console.";
+            }
+            if (hasSave && GUILayout.Button("Host new world (replaces the save)", GUILayout.Height(24)))
+            {
+                WorldOptions.NewWorldRequested = true;
                 _status = Session.Host(ParsePort()) ? "" : "Couldn't start hosting. Check the Console.";
             }
 

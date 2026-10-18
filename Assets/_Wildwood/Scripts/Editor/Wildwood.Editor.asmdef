@@ -7,7 +7,9 @@
         "Wildwood.Game",
         "Unity.Netcode.Runtime",
         "Unity.Networking.Transport",
-        "Unity.Cinemachine"
+        "Unity.Cinemachine",
+        "Unity.RenderPipelines.Universal.Runtime",
+        "Unity.RenderPipelines.Core.Runtime"
     ],
     "includePlatforms": [
         "Editor"

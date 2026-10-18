@@ -6,9 +6,12 @@ using Unity.Netcode.Transports.UTP;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.Rendering;
+using UnityEngine.Rendering.Universal;
 using UnityEngine.SceneManagement;
 using Wildwood.Game.Blocks;
 using Wildwood.Game.Player;
+using Wildwood.Game.Terrain;
 using Wildwood.Game.UI;
 
 namespace Wildwood.EditorTools
@@ -45,14 +48,21 @@ namespace Wildwood.EditorTools
             EnsureFolder(Root + "/Prefabs");
             EnsureFolder(MaterialFolder);
 
-            var groundMat = GetOrCreateMaterial("Ground", new Color(0.42f, 0.55f, 0.27f));
             var stoneMat = GetOrCreateMaterial("Stone", new Color(0.62f, 0.60f, 0.56f));
-            var woodMat = GetOrCreateMaterial("Wood", new Color(0.66f, 0.46f, 0.26f));
             var bodyMat = GetOrCreateMaterial("PlayerBody", Color.white);
             var visorMat = GetOrCreateMaterial("PlayerVisor", new Color(0.12f, 0.13f, 0.16f));
             var blocksMat = GetOrCreateMaterial("Blocks", Color.white);
             blocksMat.SetFloat("_Smoothness", 0.05f);
             var outlineMat = GetOrCreateMaterial("BlockOutline", new Color(1f, 1f, 1f), "Universal Render Pipeline/Unlit");
+            var terrainMat = GetOrCreateMaterial("TerrainGround", Color.white);
+            terrainMat.SetFloat("_Smoothness", 0f);
+            var treeMat = GetOrCreateMaterial("Trees", Color.white);
+            treeMat.SetFloat("_Smoothness", 0f);
+            var grassMat = GetOrCreateMaterial("Grass", Color.white);
+            grassMat.SetFloat("_Smoothness", 0f);
+            grassMat.SetFloat("_Cull", 0f); // draw both sides of each blade
+            grassMat.enableInstancing = true;
+            var skyMat = GetOrCreateMaterial("Sky", Color.white, "Skybox/Procedural");
 
             // Make the new scene first so the temporary objects below never touch any other scene.
             var scene = EditorSceneManager.NewScene(NewSceneSetup.DefaultGameObjects, NewSceneMode.Single);
@@ -60,10 +70,12 @@ namespace Wildwood.EditorTools
             var playerPrefab = BuildPlayerPrefab(bodyMat, visorMat);
             var prefabList = RegisterNetworkPrefab(playerPrefab);
 
-            SetUpCameraAndLight(scene);
-            BuildEnvironment(groundMat, stoneMat, woodMat);
+            var sun = SetUpCameraAndLight(scene);
+            SetUpAtmosphere(sun, skyMat);
+            BuildEnvironment(stoneMat);
             BuildNetworkManager(playerPrefab, prefabList);
             BuildBlockWorld(blocksMat, outlineMat);
+            BuildTerrain(terrainMat, treeMat, grassMat);
             new GameObject("SessionMenu").AddComponent<SessionMenu>();
 
             EditorSceneManager.SaveScene(scene, ScenePath);
@@ -197,7 +209,7 @@ namespace Wildwood.EditorTools
 
         // ---------- Scene ----------
 
-        static void SetUpCameraAndLight(Scene scene)
+        static Light SetUpCameraAndLight(Scene scene)
         {
             Camera mainCamera = null;
             Light sun = null;
@@ -213,14 +225,19 @@ namespace Wildwood.EditorTools
             if (mainCamera != null)
             {
                 mainCamera.transform.SetPositionAndRotation(overview, overviewRotation);
+                mainCamera.farClipPlane = 600f;
                 mainCamera.gameObject.AddComponent<CinemachineBrain>();
+                var cameraData = mainCamera.GetUniversalAdditionalCameraData();
+                cameraData.renderPostProcessing = true;
+                cameraData.antialiasing = UnityEngine.Rendering.Universal.AntialiasingMode.SubpixelMorphologicalAntiAliasing;
             }
 
             if (sun != null)
             {
-                sun.transform.rotation = Quaternion.Euler(38f, -40f, 0f); // warm, low-ish sun
-                sun.color = new Color(1f, 0.92f, 0.80f);
-                sun.intensity = 1.6f;
+                // Low golden-hour sun, in front of the players when they spawn (backlit, like the reference image).
+                sun.transform.rotation = Quaternion.Euler(20f, 165f, 0f);
+                sun.color = new Color(1f, 0.84f, 0.64f);
+                sun.intensity = 2.0f;
                 sun.shadows = LightShadows.Soft;
             }
 
@@ -230,7 +247,7 @@ namespace Wildwood.EditorTools
             var followCamera = cameraObject.AddComponent<CinemachineCamera>();
             followCamera.Lens.FieldOfView = 55f;
             followCamera.Lens.NearClipPlane = 0.05f; // lets the camera get close to 10 cm blocks without clipping
-            followCamera.Lens.FarClipPlane = 1000f;
+            followCamera.Lens.FarClipPlane = 600f;
 
             var thirdPerson = cameraObject.AddComponent<CinemachineThirdPersonFollow>();
             thirdPerson.ShoulderOffset = new Vector3(0.55f, 0.15f, 0f);
@@ -247,13 +264,97 @@ namespace Wildwood.EditorTools
             var serialized = new SerializedObject(rig);
             serialized.FindProperty("followCamera").objectReferenceValue = followCamera;
             serialized.ApplyModifiedPropertiesWithoutUndo();
+            return sun;
         }
 
-        static void BuildEnvironment(Material ground, Material stone, Material wood)
+        /// <summary>Golden-hour sky, warm haze and color grading.</summary>
+        static void SetUpAtmosphere(Light sun, Material sky)
         {
-            var environment = new GameObject("Environment").transform;
+            sky.SetFloat("_SunSize", 0.06f);
+            sky.SetFloat("_SunSizeConvergence", 4f);
+            sky.SetFloat("_AtmosphereThickness", 1.3f);
+            sky.SetColor("_SkyTint", new Color(0.56f, 0.58f, 0.62f));
+            sky.SetColor("_GroundColor", new Color(0.80f, 0.74f, 0.62f));
+            sky.SetFloat("_Exposure", 1.2f);
+            RenderSettings.skybox = sky;
+            if (sun != null) RenderSettings.sun = sun;
 
-            CreateBox(environment, "Ground", new Vector3(0f, -0.5f, 0f), new Vector3(200f, 1f, 200f), ground);
+            // Fixed warm ambient light (doesn't need a lighting bake).
+            RenderSettings.ambientMode = AmbientMode.Trilight;
+            RenderSettings.ambientSkyColor = new Color(0.62f, 0.66f, 0.74f);
+            RenderSettings.ambientEquatorColor = new Color(0.66f, 0.58f, 0.46f);
+            RenderSettings.ambientGroundColor = new Color(0.30f, 0.26f, 0.20f);
+
+            // Haze. It also hides where the terrain stops loading (about 130 m out).
+            RenderSettings.fog = true;
+            RenderSettings.fogMode = FogMode.Linear;
+            RenderSettings.fogColor = new Color(0.84f, 0.77f, 0.63f);
+            RenderSettings.fogStartDistance = 30f;
+            RenderSettings.fogEndDistance = 140f;
+
+            var volumeObject = new GameObject("PostProcessing");
+            var volume = volumeObject.AddComponent<Volume>();
+            volume.isGlobal = true;
+            volume.priority = 1f;
+            volume.sharedProfile = CreatePostProcessingProfile();
+        }
+
+        static VolumeProfile CreatePostProcessingProfile()
+        {
+            EnsureFolder(Root + "/Settings");
+            string path = Root + "/Settings/PostProcessing.asset";
+            AssetDatabase.DeleteAsset(path);
+            var profile = ScriptableObject.CreateInstance<VolumeProfile>();
+            AssetDatabase.CreateAsset(profile, path);
+
+            var tonemapping = AddOverride<Tonemapping>(profile);
+            tonemapping.mode.Override(TonemappingMode.Neutral);
+
+            var bloom = AddOverride<Bloom>(profile);
+            bloom.intensity.Override(0.6f);
+            bloom.threshold.Override(0.95f);
+            bloom.scatter.Override(0.75f);
+            bloom.tint.Override(new Color(1f, 0.88f, 0.72f));
+
+            var color = AddOverride<ColorAdjustments>(profile);
+            color.postExposure.Override(0.15f);
+            color.contrast.Override(10f);
+            color.saturation.Override(12f);
+            color.colorFilter.Override(new Color(1f, 0.96f, 0.9f));
+
+            var vignette = AddOverride<Vignette>(profile);
+            vignette.intensity.Override(0.22f);
+            vignette.smoothness.Override(0.45f);
+
+            EditorUtility.SetDirty(profile);
+            AssetDatabase.SaveAssets();
+            return profile;
+        }
+
+        static T AddOverride<T>(VolumeProfile profile) where T : VolumeComponent
+        {
+            var component = profile.Add<T>(false);
+            component.name = typeof(T).Name;
+            component.hideFlags = HideFlags.HideInInspector | HideFlags.HideInHierarchy;
+            AssetDatabase.AddObjectToAsset(component, profile);
+            return component;
+        }
+
+        static void BuildTerrain(Material ground, Material trees, Material grass)
+        {
+            var terrainObject = new GameObject("Terrain");
+            var view = terrainObject.AddComponent<TerrainView>();
+            var serialized = new SerializedObject(view);
+            serialized.FindProperty("groundMaterial").objectReferenceValue = ground;
+            serialized.FindProperty("treeMaterial").objectReferenceValue = trees;
+            serialized.FindProperty("grassMaterial").objectReferenceValue = grass;
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+        }
+
+        static void BuildEnvironment(Material stone)
+        {
+            // The ground itself is generated terrain now; the spawn clearing is flat at height 0.
+            var environment = new GameObject("Environment").transform;
 
             // Step test: rises of 10, 20, 30 and 40 cm. You should walk up the first three and need to jump the last.
             for (int i = 0; i < 4; i++)
@@ -261,23 +362,6 @@ namespace Wildwood.EditorTools
                 float height = 0.1f * (i + 1);
                 CreateBox(environment, $"Step {(i + 1) * 10} cm", new Vector3(-5f + i * 2f, height * 0.5f, 3f),
                     new Vector3(1.5f, height, 1.5f), stone);
-            }
-
-            // A 20 degree ramp up to a platform.
-            var ramp = CreateBox(environment, "Ramp", new Vector3(8f, 0.9f, 4f), new Vector3(3f, 0.2f, 6f), wood);
-            ramp.transform.rotation = Quaternion.Euler(-20f, 0f, 0f);
-            CreateBox(environment, "Platform", new Vector3(8f, 1.0f, 9f), new Vector3(5f, 2f, 5f), stone);
-
-            // Scattered pillars give a sense of speed and scale.
-            var random = new System.Random(7);
-            for (int i = 0; i < 24; i++)
-            {
-                float angle = (float)random.NextDouble() * Mathf.PI * 2f;
-                float distance = 14f + (float)random.NextDouble() * 40f;
-                float height = 1f + (float)random.NextDouble() * 5f;
-                float width = 0.6f + (float)random.NextDouble() * 1.5f;
-                var position = new Vector3(Mathf.Cos(angle) * distance, height * 0.5f, Mathf.Sin(angle) * distance);
-                CreateBox(environment, $"Pillar {i}", position, new Vector3(width, height, width), i % 3 == 0 ? wood : stone);
             }
         }
 

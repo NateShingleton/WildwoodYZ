@@ -19,6 +19,17 @@ Read this first in any new chat. It records what the game is, the decisions alre
 - **Corner shapes:** shape = connect the remaining corners. All 256 masks get their mesh, collision, volume and face coverage precomputed once in a lookup table. Only 45-degree slopes for now; half-step corners may come later via `Reserved`.
 - **Structure (weight and strength):** two layers. (1) Connectivity: pieces no longer touching the ground break off. (2) Load: weight flows down through ~40 cm cells; overloaded connections snap. Connection strength = material strength x touching face area. Creaks, dust and cracks warn before a collapse. Blue-to-red stress view in build mode.
 - **Debris:** big falling pieces are simulated by the host and synced. Small fragments are visual-only on each machine. The host creates pickups. Dynamic pieces use box colliders (Unity can't move non-convex mesh colliders).
+- **Undo:** the host records every block each edit changes (`BlockChange`) in a per-player `UndoHistory` (40 edits / 1.5M blocks per player). Undo only restores blocks that still look how that edit left them, so it never erases another player's later work. Clients get the result as fresh copies of the touched chunks.
+- **Edit size limits:** fill boxes up to 128 blocks per side and 64^3 blocks total (drag-built walls and floors); chisel regions up to 16.
+- **Camera:** one Cinemachine third-person camera; first person is the same camera with its shoulder offset, arm and distance blended to zero (`PlayerCameraRig.SetFirstPerson`). In first person your own renderers switch to shadows-only and the body faces the look direction.
+- **Big chisel:** chisel works on brush-sized cube regions. The region counts as one big block: deleting its corner reshapes every small block inside. Shape planes only use normals with -1/0/1 entries, so this is exact with integer math (`CornerShape.Planes`, `ContainsScaled`).
+- **Terrain:** a smooth 3D density field (positive = solid) sampled every 0.5 m, 16 m chunks (32 cells), meshed with surface nets (one vertex per surface cell, shared vertices, gradient normals). Generated from the seed on every machine; nothing terrain-related is sent or saved yet. It's volumetric on purpose so digging can be added by editing density.
+- **Biomes:** plains (low rolling hills, golden grass) and forest (hillier, dense trees). `TerrainGenerator.Forest()` = 0..1. Spawn has a flat clearing (radius 22 m, height 0) and is guaranteed forest to the east (+X) and plains to the west.
+- **Trees:** generated per 4 m cell from the seed. For now they're low-poly scenery (tapered trunk + lumpy sphere canopy or stacked cones) with capsule trunk colliders. Plan: when hit, a tree turns into real blocks so it can be chopped and fall ("lazy voxelization").
+- **Grass:** GPU-instanced tufts (`Graphics.RenderMeshInstanced`) within ~45 m of the camera; normals point up for soft lighting. Wind needs a custom shader (art pass).
+- **Colors:** everything uses stock URP Lit materials reading small generated palette textures through UVs (`BlockPalette`, `NaturePalettes`). One draw call per chunk.
+- **Saving:** only the host saves: seed + all block chunks (`WorldSaveFormat`), to `%USERPROFILE%/AppData/LocalLow/ShingIndustries/Wildwood/Worlds/sandbox.wwworld`. Saves on new world, every 60 s, and when the session ends. Written to a temp file first.
+- **Look:** golden-hour sun in front of spawn (backlit), procedural sky, linear warm fog (30-140 m, also hides the terrain load edge), trilight ambient (no bake needed), global volume: neutral tonemapping, bloom, warm color grading, light vignette. SMAA on the camera.
 
 ## Multiplayer rules (follow these for every feature)
 1. **The host owns the world.** Clients ask; the host checks, applies and broadcasts. Only the host runs the structure check.
@@ -36,44 +47,53 @@ Everything we make lives in `Assets/_Wildwood/`, separate from Asset Store impor
 
 | Folder | Assembly | What goes there |
 |---|---|---|
-| `Scripts/Core` | `Wildwood.Core` | Block data, chunks, corner shapes, meshing, structure math. No MonoBehaviours, no networking. Burst/Collections/Mathematics allowed. |
+| `Scripts/Core` | `Wildwood.Core` | Block data, chunks, corner shapes, meshing, terrain generation/meshing, save format, structure math. No MonoBehaviours, no networking. Burst/Collections/Mathematics allowed. |
 | `Scripts/Net` | `Wildwood.Net` | Sessions, network messages, world sync. References Core + Netcode. |
 | `Scripts/Game` | `Wildwood.Game` | Players, tools, rendering, UI. References Core + Net + Netcode + Input System + Cinemachine. |
 | `Scripts/Editor` | `Wildwood.Editor` | Editor-only tools (scene builder, debug windows). |
 | `Tests/EditMode` | `Wildwood.Core.Tests` | Automated tests for Core (Window > General > Test Runner). |
 
-Namespaces match: `Wildwood.Core.Blocks`, `Wildwood.Core.Meshing`, `Wildwood.Net`, `Wildwood.Game.Blocks`, `Wildwood.Game.Player`, `Wildwood.Game.UI`, `Wildwood.EditorTools`.
+Namespaces match: `Wildwood.Core.Blocks`, `Wildwood.Core.Meshing`, `Wildwood.Core.Terrain`, `Wildwood.Net`, `Wildwood.Game.Blocks`, `Wildwood.Game.Persistence`, `Wildwood.Game.Player`, `Wildwood.Game.Terrain`, `Wildwood.Game.UI`, `Wildwood.EditorTools`. (Careful: `UnityEngine.Terrain` is a Unity class; we never use it.)
 
 ### Key classes
 - `Core/Blocks/Block.cs`: the 4-byte block, `CornerBits`, `BlockConstants`.
 - `Core/Blocks/CornerShapes.cs`: the 256-entry shape table (convex hull of the remaining corners), face coverage for culling, `BlockFaces`.
 - `Core/Blocks/BlockWorld.cs` + `ChunkData.cs`: chunked storage, dirty-chunk tracking, sanitizing (unknown materials and flat shapes become air).
-- `Core/Blocks/BlockEdit.cs`: edit commands (`Fill` box, `Chisel` corners) and `BlockEditor` (validate + deterministic apply).
+- `Core/Blocks/BlockEdit.cs`: edit commands (`Fill` box, `Chisel` a cube region's corners) and `BlockEditor` (validate + deterministic apply, `RegionCorners`).
+- `Core/Blocks/WorldSaveFormat.cs`: the world file (seed + chunks).
+- `Core/Terrain/TerrainGenerator.cs`: seed to height, forest amount, steepness, tree spawns. `TerrainSettings` holds sizes.
+- `Core/Terrain/TerrainMesher.cs`: surface nets for one 16 m chunk.
 - `Core/Blocks/ChunkSerializer.cs`: run-length encoding for snapshots (and later saves).
 - `Core/Blocks/ShapeStamp.cs`: build shaped blocks from an "is this point inside?" rule (slopes, pyramids, rocks). `DemoStructures.cs` uses it.
 - `Core/Meshing/ChunkMesher.cs`: chunk to triangles, flat-shaded, palette UVs. Plain C# for now; Burst + greedy merging later.
-- `Net/BlockWorldSync.cs`: host-authoritative edits and join snapshots over Netcode named messages.
-- `Game/Blocks/BlockWorldView.cs`: owns the world on this machine, rebuilds chunk meshes/colliders. `BlockPalette.cs` makes the color texture.
-- `Game/Blocks/BlockInteractor.cs`: aiming, place/remove/chisel, materials, brush sizes, HUD (on the player prefab).
+- `Net/BlockWorldSync.cs`: host-authoritative edits, the world seed, and join snapshots over Netcode named messages. `Stopping` event fires before the world is cleared (save hook).
+- `Game/Blocks/BlockWorldView.cs`: owns the world on this machine: loads/saves when hosting, raises `WorldStarted(seed)` / `WorldEnded`, rebuilds block chunk meshes/colliders. `BlockPalette.cs` makes the color texture.
+- `Game/Persistence/WorldStorage.cs`: save file location, safe save/load, `WorldOptions` (new world vs continue).
+- `Game/Terrain/TerrainView.cs`: streams terrain columns (8 columns = 128 m radius) around the camera within a per-frame time budget, trees per column, grass. `TreeMeshBuilder`, `GrassField`, `NaturePalettes` support it.
+- `Game/Blocks/BlockInteractor.cs`: aiming, drag-to-build/remove with height (C), preview outline, chisel, materials, brush sizes, undo key, HUD (on the player prefab). Runs before `PlayerController` (`DefaultExecutionOrder(-50)`) so Escape can cancel a drag without freeing the mouse.
+- `Core/Blocks/UndoHistory.cs`: per-player undo stacks kept by the host.
 
 ## How to test
 1. **Build the scene:** menu **Wildwood > Build Sandbox Scene** (rebuilds `Scenes/Sandbox.unity` and `Prefabs/Player.prefab` from code).
 2. **Second player:** Window > Multiplayer > Multiplayer Play Mode, tick Player 2.
-3. **Play:** press Play, click **Host** in one window and **Join** in the other.
+3. **Play:** press Play, click **Host** (continues the saved world) or **Host new world** in one window, and **Join** in the other.
 4. **Controls:** WASD move, mouse look, Space jump, Shift sprint. Esc frees the mouse; click to capture it again.
-   Building (temporary until step 4): left click remove, right click place, 1-8 material, scroll brush size (1/2/4/8 blocks), C toggles chisel (left click deletes the nearest corner).
+   Building: hold right click and drag to draw a line/rectangle on the surface you started on; press C mid-drag to pull it up into a box (crosshair sets the height); release to place; Esc or the other mouse button cancels. Hold left click to do the same for removing. 1-8 material, scroll brush size (1/2/4/8 blocks, drags snap to the brush grid). C (not dragging) toggles chisel: left click deletes the marked corner of the brush box. Z undoes your last edit. V toggles first/third person.
+   Note: in the Unity Editor, Escape always frees the mouse too (editor behavior); in a built game it only cancels the drag.
+   Players hover in place if no ground exists below them yet (terrain still loading).
 5. **Tests:** Window > General > Test Runner > EditMode > Run All.
 
 ## Build order
 1. ~~Setup pass~~ (done)
 2. ~~Two players walking around a shared test scene~~ (done)
-3. **Blocks:** chunk data, corner-shape table, meshing, place/remove/chisel synced between players, join snapshots (built, needs testing)
-4. **Building tools:** line, rectangle, box, plane lock, brush sizes, preview, undo, chisel, auto-slope
+3. ~~**Blocks:** chunk data, corner-shape table, meshing, place/remove/chisel synced between players, join snapshots~~ (done)
+3b. **Terrain and nature:** plains/forest terrain, trees, grass, big chisel, world saving, golden-hour look (built, needs testing)
+4. **Building tools:** ~~line, rectangle, box (drag + C for height), plane lock, brush sizes, preview, undo, first/third person~~ (built, needs testing). Still to do: mirror, blueprints, auto-slope, redo.
 5. **Breaking off:** disconnected pieces fall with physics
 6. **Shatter, pickups, vacuum**
 7. **Weight and strength,** stress view, collapse warnings
 
-After that: terrain, world generation, art pass, survival loop (crafting, inventory, progression).
+After that: terrain digging (density edits, synced like block edits), choppable trees, more biomes, art pass (stylized shaders, grass wind, light shafts), survival loop (crafting, inventory, progression), and performance work (Burst jobs for meshing, terrain LOD).
 
 ## Project settings worth knowing
 - Run In Background is on (needed for two windows), and the game starts windowed at 1280x720 for testing.

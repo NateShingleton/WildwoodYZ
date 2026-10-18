@@ -9,10 +9,13 @@ using Wildwood.Core.Blocks;
 namespace Wildwood.Net
 {
     /// <summary>
-    /// Keeps every player's <see cref="BlockWorld"/> identical. The host owns the world:
+    /// Keeps every player's world identical: the world seed (which generates the terrain) and the blocks.
+    /// The host owns the world:
     ///  - Players send edit requests to the host (small commands, never raw blocks).
     ///  - The host checks and applies each edit, then forwards it to every client, who apply the same edit.
-    ///  - A player who joins mid-session asks for a snapshot; the host streams the current chunks to them
+    ///  - The host remembers what each player's edits changed, so each player can undo their own edits.
+    ///    An undo is sent to everyone as fresh copies of the chunks it touched.
+    ///  - A player who joins asks for a snapshot; the host replies with the world seed, then streams the chunks
     ///    a little each frame. Snapshots and edits travel on the same ordered channel, so a chunk's snapshot
     ///    always reflects every edit sent before it.
     /// Uses Netcode "named messages", so no networked GameObject is needed.
@@ -23,6 +26,8 @@ namespace Wildwood.Net
         const string EditMessage = "wildwood.blocks.edit";
         const string SnapshotRequestMessage = "wildwood.blocks.snapshot-request";
         const string ChunkMessage = "wildwood.blocks.chunk";
+        const string WorldInfoMessage = "wildwood.world.info";
+        const string UndoRequestMessage = "wildwood.blocks.undo-request";
 
         const NetworkDelivery Delivery = NetworkDelivery.ReliableFragmentedSequenced;
 
@@ -36,6 +41,9 @@ namespace Wildwood.Net
         readonly Dictionary<ulong, Queue<int3>> _pendingSnapshots = new Dictionary<ulong, Queue<int3>>();
         readonly List<ulong> _finishedSnapshots = new List<ulong>();
         readonly Dictionary<int3, IncomingChunk> _incomingChunks = new Dictionary<int3, IncomingChunk>();
+        readonly UndoHistory _undo = new UndoHistory();
+        readonly List<BlockChange> _changes = new List<BlockChange>();
+        readonly HashSet<int3> _undoChunks = new HashSet<int3>();
         bool _handlersRegistered;
 
         sealed class IncomingChunk
@@ -61,6 +69,15 @@ namespace Wildwood.Net
         /// <summary>Raised on the host when a new session starts with an empty world (a good time to load or generate).</summary>
         public event Action HostStarted;
 
+        /// <summary>Raised on a client when the host has told it the world seed.</summary>
+        public event Action<int> WorldInfoReceived;
+
+        /// <summary>Raised when a session ends, before the world is cleared (true if this machine was the host). Save here.</summary>
+        public event Action<bool> Stopping;
+
+        /// <summary>The seed the terrain is generated from. The host sets it; clients receive it when they join.</summary>
+        public int WorldSeed { get; set; }
+
         public bool IsRunning => _manager != null && _manager.IsListening;
 
         public void Dispose()
@@ -82,13 +99,28 @@ namespace Wildwood.Net
 
             if (_manager.IsServer)
             {
-                ApplyAsHost(edit);
+                ApplyAsHost(edit, NetworkManager.ServerClientId);
                 return;
             }
 
             using var writer = new FastBufferWriter(64, Allocator.Temp);
             WriteEdit(writer, edit);
             _manager.CustomMessagingManager.SendNamedMessage(EditRequestMessage, NetworkManager.ServerClientId, writer, Delivery);
+        }
+
+        /// <summary>Undo this player's most recent edit (the host does the work).</summary>
+        public void RequestUndo()
+        {
+            if (!IsRunning) return;
+            if (_manager.IsServer)
+            {
+                UndoAsHost(NetworkManager.ServerClientId);
+                return;
+            }
+
+            using var writer = new FastBufferWriter(8, Allocator.Temp);
+            writer.WriteValueSafe((byte)1); // format version
+            _manager.CustomMessagingManager.SendNamedMessage(UndoRequestMessage, NetworkManager.ServerClientId, writer, Delivery);
         }
 
         /// <summary>Call once per frame. Streams snapshot data to players who are joining.</summary>
@@ -130,6 +162,7 @@ namespace Wildwood.Net
 
         void HandleStopped(bool wasHost)
         {
+            Stopping?.Invoke(wasHost);
             UnregisterHandlers();
             ResetState();
         }
@@ -138,6 +171,7 @@ namespace Wildwood.Net
         {
             _pendingSnapshots.Clear();
             _incomingChunks.Clear();
+            _undo.Clear();
             World.Clear();
         }
 
@@ -155,6 +189,7 @@ namespace Wildwood.Net
         void HandleClientDisconnected(ulong clientId)
         {
             _pendingSnapshots.Remove(clientId);
+            _undo.Forget(clientId);
         }
 
         void RegisterHandlers()
@@ -165,6 +200,8 @@ namespace Wildwood.Net
             messaging.RegisterNamedMessageHandler(EditMessage, OnEdit);
             messaging.RegisterNamedMessageHandler(SnapshotRequestMessage, OnSnapshotRequest);
             messaging.RegisterNamedMessageHandler(ChunkMessage, OnChunk);
+            messaging.RegisterNamedMessageHandler(WorldInfoMessage, OnWorldInfo);
+            messaging.RegisterNamedMessageHandler(UndoRequestMessage, OnUndoRequest);
             _handlersRegistered = true;
         }
 
@@ -178,6 +215,8 @@ namespace Wildwood.Net
             messaging.UnregisterNamedMessageHandler(EditMessage);
             messaging.UnregisterNamedMessageHandler(SnapshotRequestMessage);
             messaging.UnregisterNamedMessageHandler(ChunkMessage);
+            messaging.UnregisterNamedMessageHandler(WorldInfoMessage);
+            messaging.UnregisterNamedMessageHandler(UndoRequestMessage);
         }
 
         // ---------- Edits ----------
@@ -185,12 +224,14 @@ namespace Wildwood.Net
         void OnEditRequest(ulong senderClientId, FastBufferReader reader)
         {
             if (!_manager.IsServer) return;
-            if (TryReadEdit(ref reader, out var edit)) ApplyAsHost(edit);
+            if (TryReadEdit(ref reader, out var edit)) ApplyAsHost(edit, senderClientId);
         }
 
-        void ApplyAsHost(in BlockEdit edit)
+        void ApplyAsHost(in BlockEdit edit, ulong player)
         {
-            if (BlockEditor.Apply(World, edit) == 0) return;
+            _changes.Clear();
+            if (BlockEditor.Apply(World, edit, _changes) == 0) return;
+            _undo.Record(player, _changes);
 
             using var writer = new FastBufferWriter(64, Allocator.Temp);
             WriteEdit(writer, edit);
@@ -259,11 +300,44 @@ namespace Wildwood.Net
             }
         }
 
+        // ---------- Undo ----------
+
+        void OnUndoRequest(ulong senderClientId, FastBufferReader reader)
+        {
+            if (_manager.IsServer) UndoAsHost(senderClientId);
+        }
+
+        void UndoAsHost(ulong player)
+        {
+            _undoChunks.Clear();
+            if (_undo.Undo(World, player, _undoChunks) == 0) return;
+
+            // Undo can touch any mix of blocks, so send everyone fresh copies of the affected chunks.
+            foreach (int3 coord in _undoChunks)
+            {
+                ChunkData chunk = World.TryGetChunk(coord, out var existing) ? existing : new ChunkData(coord);
+                foreach (ulong client in _manager.ConnectedClientsIds)
+                {
+                    if (client == NetworkManager.ServerClientId) continue;
+                    SendChunk(client, chunk);
+                }
+            }
+        }
+
         // ---------- Snapshots ----------
 
         void OnSnapshotRequest(ulong senderClientId, FastBufferReader reader)
         {
             if (!_manager.IsServer || senderClientId == NetworkManager.ServerClientId) return;
+
+            // The seed goes first, on the same ordered channel as the chunks that follow.
+            using (var writer = new FastBufferWriter(16, Allocator.Temp))
+            {
+                writer.WriteValueSafe((byte)1); // format version
+                writer.WriteValueSafe(WorldSeed);
+                _manager.CustomMessagingManager.SendNamedMessage(WorldInfoMessage, senderClientId, writer, Delivery);
+            }
+
             var queue = new Queue<int3>();
             foreach (var chunk in World.Chunks) queue.Enqueue(chunk.Coord);
             _pendingSnapshots[senderClientId] = queue;
@@ -290,6 +364,22 @@ namespace Wildwood.Net
                 _manager.CustomMessagingManager.SendNamedMessage(ChunkMessage, clientId, writer, Delivery);
             }
             return data.Length;
+        }
+
+        void OnWorldInfo(ulong senderClientId, FastBufferReader reader)
+        {
+            if (_manager.IsServer || senderClientId != NetworkManager.ServerClientId) return;
+            try
+            {
+                reader.ReadValueSafe(out byte version);
+                reader.ReadValueSafe(out int seed);
+                WorldSeed = seed;
+                WorldInfoReceived?.Invoke(seed);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning($"[Wildwood] Ignored malformed world info: {exception.Message}");
+            }
         }
 
         void OnChunk(ulong senderClientId, FastBufferReader reader)

@@ -73,6 +73,22 @@ namespace Wildwood.Core.Tests
         }
 
         [Test]
+        public void IntegerPlanesContainExactlyTheShapesOwnCorners()
+        {
+            for (int mask = 0; mask < 256; mask++)
+            {
+                var shape = CornerShapes.Get((byte)mask);
+                if (shape.IsEmpty) continue;
+                for (int corner = 0; corner < 8; corner++)
+                {
+                    var point = new Unity.Mathematics.int3(corner & 1, (corner >> 1) & 1, (corner >> 2) & 1);
+                    bool expected = (mask & (1 << corner)) != 0;
+                    Assert.AreEqual(expected, shape.ContainsScaled(point, 1), $"mask 0x{mask:X2}, corner {corner}");
+                }
+            }
+        }
+
+        [Test]
         public void EveryShapeIsWoundOutward()
         {
             // For a closed shape with outward-facing triangles, the volume comes out positive.

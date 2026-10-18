@@ -66,7 +66,14 @@ namespace Wildwood.Core.Blocks
         /// <summary>One outward normal per slanted triangle.</summary>
         public readonly Vector3[] SlantedNormals;
 
-        internal CornerShape(byte mask, bool isEmpty, float volume, byte[] faceCoverage, byte[][] triangles, Vector3[] slantedNormals)
+        /// <summary>
+        /// The shape's flat sides as whole-number planes: a point p (in unit-cube coordinates) is inside when
+        /// dot(plane.xyz, p) &lt;= plane.w for every plane. Normals only ever use -1, 0 and 1, so this test is
+        /// exact with integers, at any scale. That's what lets a big chisel reshape the small blocks inside it.
+        /// </summary>
+        public readonly int4[] Planes;
+
+        internal CornerShape(byte mask, bool isEmpty, float volume, byte[] faceCoverage, byte[][] triangles, Vector3[] slantedNormals, int4[] planes)
         {
             Mask = mask;
             IsEmpty = isEmpty;
@@ -74,6 +81,22 @@ namespace Wildwood.Core.Blocks
             FaceCoverage = faceCoverage;
             Triangles = triangles;
             SlantedNormals = slantedNormals;
+            Planes = planes;
+        }
+
+        /// <summary>
+        /// True if grid point <paramref name="point"/> lies inside (or on) this shape scaled up to a
+        /// <paramref name="size"/>-sized cube whose corner is at the origin.
+        /// </summary>
+        public bool ContainsScaled(int3 point, int size)
+        {
+            if (IsEmpty) return false;
+            for (int i = 0; i < Planes.Length; i++)
+            {
+                int4 plane = Planes[i];
+                if (math.dot(plane.xyz, point) > plane.w * size) return false;
+            }
+            return true;
         }
     }
 
@@ -106,7 +129,7 @@ namespace Wildwood.Core.Blocks
         {
             var triangles = new byte[7][];
             for (int i = 0; i < 7; i++) triangles[i] = new byte[0];
-            return new CornerShape(mask, true, 0f, new byte[6], triangles, new Vector3[0]);
+            return new CornerShape(mask, true, 0f, new byte[6], triangles, new Vector3[0], new int4[0]);
         }
 
         static CornerShape BuildShape(byte mask)
@@ -152,7 +175,9 @@ namespace Wildwood.Core.Blocks
             for (int i = 0; i < 7; i++) triangleLists[i] = new List<byte>();
             var slantedNormals = new List<Vector3>();
             var faceCoverage = new byte[6];
+            var integerPlanes = new int4[planes.Count];
             var onPlane = new List<int>(8);
+            int planeIndex = 0;
 
             foreach (var (normal, distance) in planes)
             {
@@ -165,6 +190,7 @@ namespace Wildwood.Core.Blocks
                     center += CornerPosition(i);
                 }
                 center /= onPlane.Count;
+                integerPlanes[planeIndex++] = ToIntegerPlane(normal, onPlane[0]);
 
                 // Sort the polygon's corners counter-clockwise around the outward normal. With this order,
                 // Vector3.Cross(b - a, c - a) points outward, which is what Unity treats as the front face.
@@ -206,7 +232,19 @@ namespace Wildwood.Core.Blocks
                 }
             }
 
-            return new CornerShape(mask, false, volume, faceCoverage, triangles, slantedNormals.ToArray());
+            return new CornerShape(mask, false, volume, faceCoverage, triangles, slantedNormals.ToArray(), integerPlanes);
+        }
+
+        /// <summary>Converts a unit normal like (0.707, 0.707, 0) into whole numbers (1, 1, 0) plus its offset.</summary>
+        static int4 ToIntegerPlane(Vector3 normal, int cornerOnPlane)
+        {
+            float largest = Mathf.Max(Mathf.Abs(normal.x), Mathf.Max(Mathf.Abs(normal.y), Mathf.Abs(normal.z)));
+            var n = new int3(
+                Mathf.RoundToInt(normal.x / largest),
+                Mathf.RoundToInt(normal.y / largest),
+                Mathf.RoundToInt(normal.z / largest));
+            var corner = new int3(cornerOnPlane & 1, (cornerOnPlane >> 1) & 1, (cornerOnPlane >> 2) & 1);
+            return new int4(n, math.dot(n, corner));
         }
 
         static bool ContainsPlane(List<(Vector3 normal, float distance)> planes, Vector3 normal, float distance)

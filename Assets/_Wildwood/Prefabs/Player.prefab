@@ -178,6 +178,7 @@ MonoBehaviour:
   ShowTopMostFoldoutHeaderGroup: 1
   reach: 6
   eye: {fileID: 8804240166462100811}
+  maxDragDistance: 40
 --- !u!1 &769977521473251998
 GameObject:
   m_ObjectHideFlags: 0

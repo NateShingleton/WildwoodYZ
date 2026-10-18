@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Unity.Mathematics;
 using Unity.Netcode;
@@ -5,13 +6,15 @@ using UnityEngine;
 using UnityEngine.Rendering;
 using Wildwood.Core.Blocks;
 using Wildwood.Core.Meshing;
+using Wildwood.Game.Persistence;
 using Wildwood.Net;
 
 namespace Wildwood.Game.Blocks
 {
     /// <summary>
-    /// The scene object that owns this machine's copy of the block world. It creates the network sync,
-    /// and turns changed chunks into meshes and colliders a few per frame.
+    /// The scene object that owns this machine's copy of the world. It creates the network sync, loads and saves
+    /// the world when hosting, announces the world seed (terrain listens for it), and turns changed block chunks
+    /// into meshes and colliders a few per frame.
     /// </summary>
     public class BlockWorldView : MonoBehaviour
     {
@@ -26,10 +29,24 @@ namespace Wildwood.Game.Blocks
         [Tooltip("Chunk meshes rebuilt per frame at most. Higher = changes appear sooner, but bigger hitches.")]
         [SerializeField] int chunkRebuildsPerFrame = 8;
 
-        [Tooltip("When hosting, place the demo builds (pyramid, ramp, boulder, wall) at the start of a session.")]
+        [Tooltip("When hosting a brand new world, place the demo builds (pyramid, ramp, boulder, wall).")]
         [SerializeField] bool buildDemoStructures = true;
 
+        [Tooltip("When hosting, save the world this often (seconds). It also saves when the session ends.")]
+        [SerializeField] float autosaveSeconds = 60f;
+
         public BlockWorld World { get; private set; }
+
+        /// <summary>The current world's seed (valid while <see cref="HasWorld"/>).</summary>
+        public int Seed { get; private set; }
+
+        public bool HasWorld { get; private set; }
+
+        /// <summary>A world became available on this machine (hosting, or joined and got the seed).</summary>
+        public event Action<int> WorldStarted;
+
+        /// <summary>The session ended and the world was unloaded.</summary>
+        public event Action WorldEnded;
 
         public Material OutlineMaterial => outlineMaterial;
 
@@ -52,6 +69,8 @@ namespace Wildwood.Game.Blocks
         BlockWorldSync _sync;
         Material _runtimeMaterial;
         Texture2D _palette;
+        bool _isHostSession;
+        float _nextAutosave;
 
         void Awake()
         {
@@ -84,6 +103,8 @@ namespace Wildwood.Game.Blocks
             }
             _sync = new BlockWorldSync(manager, World);
             _sync.HostStarted += OnHostStarted;
+            _sync.WorldInfoReceived += OnWorldInfoReceived;
+            _sync.Stopping += OnSessionStopping;
         }
 
         void OnDestroy()
@@ -91,6 +112,8 @@ namespace Wildwood.Game.Blocks
             if (_sync != null)
             {
                 _sync.HostStarted -= OnHostStarted;
+                _sync.WorldInfoReceived -= OnWorldInfoReceived;
+                _sync.Stopping -= OnSessionStopping;
                 _sync.Dispose();
             }
             if (World != null) World.Cleared -= DestroyAllChunkViews;
@@ -106,14 +129,71 @@ namespace Wildwood.Game.Blocks
             _sync?.RequestEdit(edit);
         }
 
+        /// <summary>Undo this player's most recent edit.</summary>
+        public void RequestUndo()
+        {
+            _sync?.RequestUndo();
+        }
+
         void OnHostStarted()
         {
-            if (buildDemoStructures) DemoStructures.Build(World);
+            _isHostSession = true;
+            bool startFresh = WorldOptions.ConsumeNewWorldRequest();
+
+            int seed;
+            if (!startFresh && WorldStorage.TryLoad(World, out seed))
+            {
+                Debug.Log($"[Wildwood] Loaded world (seed {seed}) from {WorldStorage.FilePath}");
+            }
+            else
+            {
+                seed = new System.Random().Next(1, int.MaxValue);
+                if (buildDemoStructures) DemoStructures.Build(World);
+                WorldStorage.TrySave(World, seed);
+                Debug.Log($"[Wildwood] Started a new world (seed {seed}). It saves to {WorldStorage.FilePath}");
+            }
+
+            _sync.WorldSeed = seed;
+            _nextAutosave = Time.unscaledTime + autosaveSeconds;
+            BeginWorld(seed);
+        }
+
+        void OnWorldInfoReceived(int seed)
+        {
+            BeginWorld(seed);
+        }
+
+        void BeginWorld(int seed)
+        {
+            Seed = seed;
+            HasWorld = true;
+            WorldStarted?.Invoke(seed);
+        }
+
+        void OnSessionStopping(bool wasHost)
+        {
+            // On the host this runs twice (server and client both stop); only the first one saves.
+            if (_isHostSession)
+            {
+                _isHostSession = false;
+                if (WorldStorage.TrySave(World, Seed)) Debug.Log("[Wildwood] World saved.");
+            }
+            if (HasWorld)
+            {
+                HasWorld = false;
+                WorldEnded?.Invoke();
+            }
         }
 
         void Update()
         {
             _sync?.Tick();
+
+            if (_isHostSession && autosaveSeconds > 0f && Time.unscaledTime >= _nextAutosave)
+            {
+                _nextAutosave = Time.unscaledTime + autosaveSeconds;
+                WorldStorage.TrySave(World, Seed);
+            }
 
             World.TakeDirty(_dirty);
             foreach (int3 coord in _dirty)
